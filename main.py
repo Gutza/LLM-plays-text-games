@@ -344,7 +344,7 @@ def simulate_from_scratch(game_path, commands, *, aux_panels, include_aux_snapsh
                 ],
             )
 
-        return observation, reward, done, info, aux, executed
+        return observation.strip(), reward, done, info, aux, executed
     finally:
         close_fn = getattr(env, "close", None)
         if callable(close_fn):
@@ -425,12 +425,6 @@ def main():
         print("\n" + "- " * 35 + "\n")
 
         if human_mode:
-            print(
-                format_aux_snapshot(
-                    aux,
-                    header="[AUXILIARY STATE - DEBUG VIEW - NOT RECORDED IN HISTORY]",
-                )
-            )
             command = input("Your command (type LLM to hand over)> ").strip()
             if not command:
                 print("Please enter a command.")
