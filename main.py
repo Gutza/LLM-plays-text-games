@@ -61,6 +61,13 @@ class AuxSnapshot:
         }
 
 
+@dataclass(slots=True)
+class RepeatActionTracker:
+    last_key: tuple[str, str, str, str] | None = None
+    repeat_count: int = 0
+    last_augmented_observation: str | None = None
+
+
 DEFAULT_AUX_PANELS = [
     AuxPanelSpec(title="INVENTORY", command="inventory"),
     AuxPanelSpec(title="ENVIRONMENT", command="look"),
@@ -302,6 +309,15 @@ def format_aux_snapshot(aux, *, header):
     return "\n".join(parts).strip()
 
 
+def get_panel_content(aux: AuxSnapshot | None, title: str) -> str:
+    if not aux or not title:
+        return ""
+    for panel in aux.panels:
+        if panel.title == title:
+            return panel.content or ""
+    return ""
+
+
 def collect_aux_panels(env, panels):
     if not panels:
         return []
@@ -402,6 +418,7 @@ def main():
         return
 
     human_mode = args.human
+    repeat_tracker = RepeatActionTracker()
 
     while True:
         llm_journal: dict[str, Any] | None = None
@@ -435,8 +452,11 @@ def main():
                 continue
             actor = "human"
         else:
+            observation_for_llm = (
+                repeat_tracker.last_augmented_observation or observation
+            )
             command, llm_journal = llm_agent.get_action(
-                observation, temporary_snapshot=temporary_snapshot
+                observation_for_llm, temporary_snapshot=temporary_snapshot
             )
             print(f"LLM> {command}")
             actor = "llm"
@@ -455,13 +475,32 @@ def main():
         if done and executed < len(command_queue):
             print("Engine ended early; command history is inconsistent.")
             sys.exit(1)
-        print(observation)
+        environment_text = get_panel_content(aux_post, "ENVIRONMENT").strip()
+        inventory_text = get_panel_content(aux_post, "INVENTORY").strip()
+        observation_text = (observation or "").strip()
+        repeat_key = (command, observation_text, environment_text, inventory_text)
+        if repeat_tracker.last_key == repeat_key:
+            repeat_tracker.repeat_count += 1
+        else:
+            repeat_tracker.last_key = repeat_key
+            repeat_tracker.repeat_count = 1
+
+        if repeat_tracker.repeat_count > 1:
+            augmented_observation = (
+                f"{observation_text}\n"
+                f"(You did the exact same thing {repeat_tracker.repeat_count} times in a row. This is not a warning, just a reminder.)"
+            )
+        else:
+            augmented_observation = observation_text
+        repeat_tracker.last_augmented_observation = augmented_observation
+
+        print(augmented_observation)
 
         append_step_with_aux(
             log_data,
             actor,
             command,
-            observation,
+            augmented_observation,
             reward,
             done,
             info,
