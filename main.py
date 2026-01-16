@@ -63,7 +63,7 @@ class AuxSnapshot:
 
 DEFAULT_AUX_PANELS = [
     AuxPanelSpec(title="INVENTORY", command="inventory"),
-    AuxPanelSpec(title="LOOK AROUND", command="look"),
+    AuxPanelSpec(title="ENVIRONMENT", command="look"),
 ]
 
 
@@ -164,7 +164,16 @@ def load_log(log_path):
 
 
 def append_step_with_aux(
-    log_data, actor, command, observation, reward, done, info, aux: AuxSnapshot | None
+    log_data,
+    actor,
+    command,
+    observation,
+    reward,
+    done,
+    info,
+    aux: AuxSnapshot | None,
+    *,
+    llm_journal: dict[str, Any] | None = None,
 ):
     steps = log_data.setdefault("steps", [])
     aux_dict = aux.to_dict() if aux is not None else None
@@ -178,6 +187,7 @@ def append_step_with_aux(
             "done": done,
             "info": make_json_safe(info),
             "aux": make_json_safe(aux_dict),
+            "llm": make_json_safe(llm_journal),
             "ts": iso_now(),
         }
     )
@@ -199,18 +209,69 @@ class LLMAgent:
             }
         ]
 
+    @staticmethod
+    def _approx_tokens_from_text(text: str) -> int:
+        # Heuristic: ~4 chars/token for English-like text. Useful when real usage
+        # numbers aren't available.
+        if not text:
+            return 0
+        return max(1, (len(text) + 3) // 4)
+
+    @staticmethod
+    def _approx_tokens_from_chars(char_count: int) -> int:
+        if not char_count:
+            return 0
+        return max(1, (int(char_count) + 3) // 4)
+
+    @classmethod
+    def _summarize_messages(cls, messages: list[dict[str, str]]) -> dict[str, Any]:
+        chars_total = 0
+        chars_by_role: dict[str, int] = {}
+        for msg in messages:
+            role = str(msg.get("role", "unknown"))
+            content = msg.get("content", "")
+            if not isinstance(content, str):
+                content = str(content)
+            n = len(content)
+            chars_total += n
+            chars_by_role[role] = chars_by_role.get(role, 0) + n
+        return {
+            "messages": len(messages),
+            "chars_total": chars_total,
+            "chars_by_role": dict(sorted(chars_by_role.items(), key=lambda kv: kv[0])),
+            "approx_tokens_total": cls._approx_tokens_from_chars(chars_total),
+        }
+
     def get_action(self, observation, *, temporary_snapshot=None):
         self.game_history.append({"role": "user", "content": observation})
-        messages = list(self.game_history)
+        messages = list[dict[str, str]](self.game_history[:-1])
         if temporary_snapshot:
             messages.append({"role": "user", "content": temporary_snapshot})
+        history_summary_before = self._summarize_messages(self.game_history)
+        request_summary = self._summarize_messages(messages)
         response = self.client.chat.completions.create(
             model=self.model,
             messages=messages,
         )
         model_response = response.choices[0].message.content
         self.game_history.append({"role": "assistant", "content": model_response})
-        return model_response
+        usage = getattr(response, "usage", None)
+        usage_dict: dict[str, Any] | None = None
+        if usage is not None:
+            usage_dict = {
+                "prompt_tokens": getattr(usage, "prompt_tokens", None),
+                "completion_tokens": getattr(usage, "completion_tokens", None),
+                "total_tokens": getattr(usage, "total_tokens", None),
+            }
+        history_summary_after = self._summarize_messages(self.game_history)
+        journal = {
+            "model": self.model,
+            "request": request_summary,
+            "history_before": history_summary_before,
+            "history_after": history_summary_after,
+            "usage": usage_dict,
+        }
+        return model_response, journal
 
 
 def extract_aux_meta(info, *, reward, done):
@@ -234,11 +295,11 @@ def format_aux_snapshot(aux, *, header):
         parts.append("")
     for panel in aux.panels:
         title = panel.title or "PANEL"
-        content = (panel.content or "").rstrip()
+        content = (panel.content or "").strip()
         parts.append(f"{title}:")
         parts.append(content)
         parts.append("")
-    return "\n".join(parts).rstrip() + "\n"
+    return "\n".join(parts).strip()
 
 
 def collect_aux_panels(env, panels):
@@ -273,9 +334,14 @@ def simulate_from_scratch(game_path, commands, *, aux_panels, include_aux_snapsh
 
         aux = AuxSnapshot(meta=extract_aux_meta(info, reward=reward, done=done))
         if include_aux_snapshot and not done:
+            main_observation = observation or ""
             aux = AuxSnapshot(
                 meta=aux.meta,
-                panels=collect_aux_panels(env, aux_panels),
+                panels=[
+                    panel
+                    for panel in collect_aux_panels(env, aux_panels)
+                    if panel.content and panel.content not in main_observation
+                ],
             )
 
         return observation, reward, done, info, aux, executed
@@ -338,6 +404,7 @@ def main():
     human_mode = args.human
 
     while True:
+        llm_journal: dict[str, Any] | None = None
         observation, _, done, _, aux, _ = simulate_from_scratch(
             game_path,
             command_queue,
@@ -347,6 +414,16 @@ def main():
         if done:
             return
 
+        print("\n" + "=" * 70 + "\n")
+
+        temporary_snapshot = format_aux_snapshot(
+            aux,
+            header="Game state: "
+        )
+        print(temporary_snapshot)
+
+        print("\n" + "- " * 35 + "\n")
+
         if human_mode:
             print(
                 format_aux_snapshot(
@@ -354,7 +431,7 @@ def main():
                     header="[AUXILIARY STATE - DEBUG VIEW - NOT RECORDED IN HISTORY]",
                 )
             )
-            command = input("Your command (type LLM to hand over): ").strip()
+            command = input("Your command (type LLM to hand over)> ").strip()
             if not command:
                 print("Please enter a command.")
                 continue
@@ -364,20 +441,14 @@ def main():
                 continue
             actor = "human"
         else:
-            temporary_snapshot = format_aux_snapshot(
-                aux,
-                header="[TEMPORARY SNAPSHOT - DO NOT ADD TO HISTORY]",
-            )
-            command = llm_agent.get_action(
+            command, llm_journal = llm_agent.get_action(
                 observation, temporary_snapshot=temporary_snapshot
             )
-            print(f"LLM command: {command}")
+            print(f"LLM> {command}")
             actor = "llm"
 
-        print("<" * 70)
         if not command or not command.strip():
             print("Empty command; please try again.")
-            print(">" * 70)
             continue
 
         command_queue.append(command)
@@ -391,12 +462,18 @@ def main():
             print("Engine ended early; command history is inconsistent.")
             sys.exit(1)
         print(observation)
-        print(f"Reward: {reward}")
-        print(f"Done: {done}")
-        print(f"Info: {info}")
-        print(">" * 70)
 
-        append_step_with_aux(log_data, actor, command, observation, reward, done, info, aux_post)
+        append_step_with_aux(
+            log_data,
+            actor,
+            command,
+            observation,
+            reward,
+            done,
+            info,
+            aux_post,
+            llm_journal=(llm_journal if actor == "llm" else None),
+        )
         write_log_atomic(log_path, log_data)
 
         if done:
