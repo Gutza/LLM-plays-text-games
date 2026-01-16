@@ -139,7 +139,7 @@ def write_log_atomic(log_path, log_data):
     os.replace(tmp_path, log_path)
 
 
-def create_new_log(game_path, model_name, initial_observation):
+def create_new_log(game_path, model_name, initial_observation, *, seed: int):
     save_dir = ensure_savegames_dir()
     file_name = f"{game_stem(game_path)}_{timestamp_now()}.json"
     log_path = save_dir / file_name
@@ -148,6 +148,7 @@ def create_new_log(game_path, model_name, initial_observation):
             "game_file": str(game_path),
             "created_at": iso_now(),
             "model": model_name,
+            "seed": seed,
         },
         "initial_observation": initial_observation,
         "steps": [],
@@ -334,183 +335,212 @@ def collect_aux_panels(env, panels):
     return collected
 
 
-def simulate_from_scratch(game_path, commands, *, aux_panels, include_aux_snapshot):
-    env = FrotzEnv(str(game_path))
-    try:
-        observation, info = env.reset()
-        reward = 0
-        done = False
-        executed = 0
-
-        for command in commands:
-            executed += 1
-            observation, reward, done, info = env.step(command)
-            if done:
-                break
-
-        aux = AuxSnapshot(meta=extract_aux_meta(info, reward=reward, done=done))
-        if include_aux_snapshot and not done:
-            main_observation = observation or ""
-            aux = AuxSnapshot(
-                meta=aux.meta,
-                panels=[
-                    panel
-                    for panel in collect_aux_panels(env, aux_panels)
-                    if panel.content and panel.content not in main_observation
-                ],
-            )
-
-        return observation.strip(), reward, done, info, aux, executed
-    finally:
-        close_fn = getattr(env, "close", None)
-        if callable(close_fn):
-            close_fn()
+def build_aux_snapshot(
+    env,
+    *,
+    info,
+    reward,
+    done,
+    aux_panels,
+    include_aux_snapshot,
+    main_observation,
+):
+    aux = AuxSnapshot(meta=extract_aux_meta(info, reward=reward, done=done))
+    if include_aux_snapshot and not done:
+        saved_state = env.get_state()
+        main_text = (main_observation or "").strip()
+        aux = AuxSnapshot(
+            meta=aux.meta,
+            panels=[
+                panel
+                for panel in collect_aux_panels(env, aux_panels)
+                if panel.content and panel.content not in main_text
+            ],
+        )
+        env.set_state(saved_state)
+    return aux
 
 
 def main():
     args = parse_args()
     game_path = resolve_game_path(args.game)
+    DEFAULT_GAME_SEED = 42
 
     client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
     llm_agent = LLMAgent(client, game_stem(game_path))
-
-    if args.load:
-        log_path, log_data = load_log(args.load)
-    else:
-        env = FrotzEnv(str(game_path))
-        try:
-            observation, info = env.reset()
-        finally:
-            close_fn = getattr(env, "close", None)
-            if callable(close_fn):
-                close_fn()
-        log_path, log_data = create_new_log(game_path, llm_agent.model, observation)
-
-    if not log_data.get("initial_observation"):
-        env = FrotzEnv(str(game_path))
-        try:
-            observation, info = env.reset()
-        finally:
-            close_fn = getattr(env, "close", None)
-            if callable(close_fn):
-                close_fn()
-        log_data["initial_observation"] = observation
-
-    command_queue = []
-    for step in log_data.get("steps", []):
-        command = step.get("command", "")
-        if not isinstance(command, str) or not command.strip():
-            continue
-        command_queue.append(command)
-
-    observation, _, done, _, _, executed = simulate_from_scratch(
-        game_path,
-        command_queue,
-        aux_panels=DEFAULT_AUX_PANELS,
-        include_aux_snapshot=False,
-    )
-    if done and executed < len(command_queue):
-        print("Replay ended early; savegame does not match engine state.")
-        sys.exit(1)
-
-    print(observation)
-    if done:
-        return
-
-    human_mode = args.human
-    repeat_tracker = RepeatActionTracker()
-
-    while True:
-        llm_journal: dict[str, Any] | None = None
-        observation, _, done, _, aux, _ = simulate_from_scratch(
-            game_path,
-            command_queue,
-            aux_panels=DEFAULT_AUX_PANELS,
-            include_aux_snapshot=True,
-        )
-        if done:
-            return
-
-        print("\n" + "=" * 70 + "\n")
-
-        temporary_snapshot = format_aux_snapshot(
-            aux,
-            header="Game state: "
-        )
-        print(temporary_snapshot)
-
-        print("\n" + "- " * 35 + "\n")
-
-        if human_mode:
-            command = input("Your command (type LLM to hand over)> ").strip()
-            if not command:
-                print("Please enter a command.")
-                continue
-            if command.upper() == "LLM":
-                human_mode = False
-                print("Handing over control to LLM.")
-                continue
-            actor = "human"
+    env = None
+    try:
+        if args.load:
+            log_path, log_data = load_log(args.load)
         else:
-            observation_for_llm = (
-                repeat_tracker.last_augmented_observation or observation
+            env = FrotzEnv(str(game_path), seed=DEFAULT_GAME_SEED)
+            try:
+                initial_observation, info = env.reset()
+            finally:
+                close_fn = getattr(env, "close", None)
+                if callable(close_fn):
+                    close_fn()
+            log_path, log_data = create_new_log(
+                game_path, llm_agent.model, initial_observation, seed=DEFAULT_GAME_SEED
             )
-            command, llm_journal = llm_agent.get_action(
-                observation_for_llm, temporary_snapshot=temporary_snapshot
-            )
-            print(f"LLM> {command}")
-            actor = "llm"
 
-        if not command or not command.strip():
-            print("Empty command; please try again.")
-            continue
+        game_seed = DEFAULT_GAME_SEED
+        meta = log_data.setdefault("meta", {})
+        seed_persisted = False
+        if isinstance(meta, dict):
+            saved_seed = meta.get("seed")
+            if isinstance(saved_seed, int):
+                game_seed = saved_seed
+            else:
+                meta["seed"] = game_seed
+                seed_persisted = True
+        else:
+            log_data["meta"] = {"seed": game_seed}
+            seed_persisted = True
 
-        command_queue.append(command)
-        observation, reward, done, info, aux_post, executed = simulate_from_scratch(
-            game_path,
-            command_queue,
-            aux_panels=DEFAULT_AUX_PANELS,
-            include_aux_snapshot=True,
-        )
+        env = FrotzEnv(str(game_path), seed=game_seed)
+        initial_observation, info = env.reset()
+
+        if not log_data.get("initial_observation"):
+            log_data["initial_observation"] = initial_observation
+            seed_persisted = True
+        if seed_persisted:
+            write_log_atomic(log_path, log_data)
+
+        command_queue = []
+        for step in log_data.get("steps", []):
+            command = step.get("command", "")
+            if not isinstance(command, str) or not command.strip():
+                continue
+            command_queue.append(command)
+
+        observation = initial_observation
+        reward = 0
+        done = False
+        executed = 0
+        for command in command_queue:
+            executed += 1
+            observation, reward, done, info = env.step(command)
+            if done:
+                break
         if done and executed < len(command_queue):
-            print("Engine ended early; command history is inconsistent.")
+            print("Replay ended early; savegame does not match engine state.")
             sys.exit(1)
-        environment_text = get_panel_content(aux_post, "ENVIRONMENT").strip()
-        inventory_text = get_panel_content(aux_post, "INVENTORY").strip()
-        observation_text = (observation or "").strip()
-        repeat_key = (command, observation_text, environment_text, inventory_text)
-        if repeat_tracker.last_key == repeat_key:
-            repeat_tracker.repeat_count += 1
-        else:
-            repeat_tracker.last_key = repeat_key
-            repeat_tracker.repeat_count = 1
 
-        if repeat_tracker.repeat_count > 1:
-            augmented_observation = (
-                f"{observation_text}\n"
-                f"(You did the exact same thing {repeat_tracker.repeat_count} times in a row. This is not a warning, just a reminder.)"
-            )
-        else:
-            augmented_observation = observation_text
-        repeat_tracker.last_augmented_observation = augmented_observation
+        current_state = env.get_state()
 
-        print(augmented_observation)
-
-        append_step_with_aux(
-            log_data,
-            actor,
-            command,
-            augmented_observation,
-            reward,
-            done,
-            info,
-            aux_post,
-            llm_journal=(llm_journal if actor == "llm" else None),
-        )
-        write_log_atomic(log_path, log_data)
-
+        print(observation)
         if done:
             return
+
+        human_mode = args.human
+        repeat_tracker = RepeatActionTracker()
+
+        while True:
+            llm_journal: dict[str, Any] | None = None
+            env.set_state(current_state)
+            aux = build_aux_snapshot(
+                env,
+                info=info,
+                reward=reward,
+                done=done,
+                aux_panels=DEFAULT_AUX_PANELS,
+                include_aux_snapshot=True,
+                main_observation=observation,
+            )
+            if done:
+                return
+
+            print("\n" + "=" * 70 + "\n")
+
+            temporary_snapshot = format_aux_snapshot(
+                aux,
+                header="Game state: ",
+            )
+            print(temporary_snapshot)
+
+            print("\n" + "- " * 35 + "\n")
+
+            if human_mode:
+                command = input("Your command (type LLM to hand over)> ").strip()
+                if not command:
+                    print("Please enter a command.")
+                    continue
+                if command.upper() == "LLM":
+                    human_mode = False
+                    print("Handing over control to LLM.")
+                    continue
+                actor = "human"
+            else:
+                observation_for_llm = (
+                    repeat_tracker.last_augmented_observation or observation
+                )
+                command, llm_journal = llm_agent.get_action(
+                    observation_for_llm, temporary_snapshot=temporary_snapshot
+                )
+                print(f"LLM> {command}")
+                actor = "llm"
+
+            if not command or not command.strip():
+                print("Empty command; please try again.")
+                continue
+
+            command_queue.append(command)
+            env.set_state(current_state)
+            observation, reward, done, info = env.step(command)
+            state_after = env.get_state()
+            aux_post = build_aux_snapshot(
+                env,
+                info=info,
+                reward=reward,
+                done=done,
+                aux_panels=DEFAULT_AUX_PANELS,
+                include_aux_snapshot=True,
+                main_observation=observation,
+            )
+            env.set_state(state_after)
+            current_state = state_after
+
+            environment_text = get_panel_content(aux_post, "ENVIRONMENT").strip()
+            inventory_text = get_panel_content(aux_post, "INVENTORY").strip()
+            observation_text = (observation or "").strip()
+            repeat_key = (command, observation_text, environment_text, inventory_text)
+            if repeat_tracker.last_key == repeat_key:
+                repeat_tracker.repeat_count += 1
+            else:
+                repeat_tracker.last_key = repeat_key
+                repeat_tracker.repeat_count = 1
+
+            if repeat_tracker.repeat_count > 1:
+                augmented_observation = (
+                    f"{observation_text}\n"
+                    f"(You did the exact same thing {repeat_tracker.repeat_count} times in a row. This is not a warning, just a reminder.)"
+                )
+            else:
+                augmented_observation = observation_text
+            repeat_tracker.last_augmented_observation = augmented_observation
+
+            print(augmented_observation)
+
+            append_step_with_aux(
+                log_data,
+                actor,
+                command,
+                augmented_observation,
+                reward,
+                done,
+                info,
+                aux_post,
+                llm_journal=(llm_journal if actor == "llm" else None),
+            )
+            write_log_atomic(log_path, log_data)
+
+            if done:
+                return
+    finally:
+        close_fn = getattr(env, "close", None)
+        if callable(close_fn):
+            close_fn()
 
 
 if __name__ == "__main__":
