@@ -68,10 +68,36 @@ class RepeatActionTracker:
     last_augmented_observation: str | None = None
 
 
+@dataclass(slots=True)
+class MoveTracker:
+    logical_moves: int = 0
+    last_engine_moves: int | None = None
+
+    def advance(self, engine_moves: int | None) -> int:
+        if not isinstance(engine_moves, int):
+            self.logical_moves += 1
+            return self.logical_moves
+        if self.last_engine_moves is None:
+            self.last_engine_moves = engine_moves
+            self.logical_moves = max(self.logical_moves, engine_moves)
+            return self.logical_moves
+        if engine_moves > self.last_engine_moves:
+            self.last_engine_moves = engine_moves
+            if engine_moves > self.logical_moves:
+                self.logical_moves = engine_moves
+                return self.logical_moves
+        self.logical_moves += 1
+        return self.logical_moves
+
+
 DEFAULT_AUX_PANELS = [
     AuxPanelSpec(title="INVENTORY", command="inventory"),
     AuxPanelSpec(title="ENVIRONMENT", command="look"),
 ]
+
+MAX_STM_SIZE = 30
+LTM_BATCH_SIZE = 10
+SUMMARY_ACTOR = "summary"
 
 
 def parse_args():
@@ -135,8 +161,204 @@ def make_json_safe(value):
 def write_log_atomic(log_path, log_data):
     tmp_path = log_path.with_suffix(log_path.suffix + ".tmp")
     with tmp_path.open("w", encoding="utf-8") as handle:
-        json.dump(log_data, handle, indent=2, ensure_ascii=True)
+        json.dump(log_data, handle, indent=2, ensure_ascii=False)
     os.replace(tmp_path, log_path)
+
+
+def is_summary_step(step: dict[str, Any] | None) -> bool:
+    if not isinstance(step, dict):
+        return False
+    if step.get("actor") != SUMMARY_ACTOR:
+        return False
+    return isinstance(step.get("summary"), str)
+
+
+def get_ltm_summary_and_stm_steps(
+    steps: list[dict[str, Any]] | None,
+) -> tuple[str, list[dict[str, Any]], int]:
+    if not steps:
+        return "", [], -1
+    summary_text = ""
+    last_summary_index = -1
+    for idx, step in enumerate(steps):
+        if not is_summary_step(step):
+            continue
+        summary_value = step.get("summary")
+        summary_text = summary_value if isinstance(summary_value, str) else ""
+        last_summary_index = idx
+    stm_steps = [
+        step
+        for step in steps[last_summary_index + 1 :]
+        if isinstance(step, dict) and not is_summary_step(step)
+    ]
+    return summary_text, stm_steps, last_summary_index
+
+
+def collect_stm_batch(
+    steps: list[dict[str, Any]],
+    last_summary_index: int,
+    batch_size: int,
+) -> tuple[list[dict[str, Any]], int]:
+    batch: list[dict[str, Any]] = []
+    if batch_size <= 0:
+        return batch, len(steps)
+    insert_index = len(steps)
+    count = 0
+    for idx in range(last_summary_index + 1, len(steps)):
+        step = steps[idx]
+        if is_summary_step(step):
+            continue
+        batch.append(step)
+        count += 1
+        if count >= batch_size:
+            insert_index = idx + 1
+            break
+    return batch, insert_index
+
+
+def format_turns_for_summary(steps: list[dict[str, Any]]) -> str:
+    if not steps:
+        return ""
+    parts: list[str] = []
+    for step in steps:
+        command = step.get("command", "")
+        observation = step.get("observation", "")
+        actor = step.get("actor", "")
+        command_text = command.strip() if isinstance(command, str) else str(command)
+        observation_text = (
+            observation.strip() if isinstance(observation, str) else str(observation)
+        )
+        actor_text = actor.strip() if isinstance(actor, str) else ""
+        if command_text:
+            if actor_text:
+                parts.append(f"Command ({actor_text}): {command_text}")
+            else:
+                parts.append(f"Command: {command_text}")
+        if observation_text:
+            parts.append(f"Observation: {observation_text}")
+        parts.append("")
+    return "\n".join(parts).strip()
+
+
+def format_recent_turns(steps: list[dict[str, Any]]) -> str:
+    if not steps:
+        return ""
+    parts = ["Recent turns (oldest to newest):"]
+    for idx, step in enumerate(steps, start=1):
+        command = step.get("command", "")
+        observation = step.get("observation", "")
+        actor = step.get("actor", "")
+        command_text = command.strip() if isinstance(command, str) else str(command)
+        observation_text = (
+            observation.strip() if isinstance(observation, str) else str(observation)
+        )
+        actor_text = actor.strip() if isinstance(actor, str) else ""
+        if command_text:
+            if actor_text:
+                parts.append(f"{idx}. Command ({actor_text}): {command_text}")
+            else:
+                parts.append(f"{idx}. Command: {command_text}")
+        if observation_text:
+            parts.append(f"Observation: {observation_text}")
+        parts.append("")
+    return "\n".join(parts).strip()
+
+
+def build_summary_step(summary_text: str, batch_steps: list[dict[str, Any]]) -> dict[str, Any]:
+    summarized_step_ids = [
+        step_id
+        for step in batch_steps
+        for step_id in [step.get("i")]
+        if isinstance(step_id, int)
+    ]
+    return {
+        "i": None,
+        "actor": SUMMARY_ACTOR,
+        "summary": summary_text,
+        "summarized_step_ids": summarized_step_ids,
+        "summarized_step_count": len(batch_steps),
+        "ts": iso_now(),
+    }
+
+
+def next_step_id(steps: list[dict[str, Any]]) -> int:
+    step_ids = [step.get("i") for step in steps if isinstance(step.get("i"), int)]
+    if not step_ids:
+        return 0
+    return max(step_ids) + 1
+
+
+def summarize_ltm_batch(
+    client,
+    *,
+    model: str,
+    current_summary: str,
+    batch_steps: list[dict[str, Any]],
+) -> str:
+    if not batch_steps:
+        return current_summary
+    system_prompt = (
+        "You are the chronicler of a text adventure game. Your job is to update the "
+        "story so far. You will be given a 'Previous Summary' and a sequence of "
+        "'New Game Turns'.\n"
+        "1. Incorporate the significant events from the New Game Turns into the "
+        "Previous Summary.\n"
+        "2. Drop trivial details (e.g., typos, 'look' commands that revealed "
+        "nothing new, failed movement attempts).\n"
+        "3. Maintain a coherent narrative flow.\n"
+        "4. Output ONLY the updated summary."
+    )
+    turns_text = format_turns_for_summary(batch_steps)
+    user_prompt = (
+        "Previous Summary:\n"
+        f"{current_summary.strip() if isinstance(current_summary, str) else ''}\n\n"
+        "New Game Turns:\n"
+        f"{turns_text}"
+    )
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+    )
+    summary_text = response.choices[0].message.content
+
+    if not isinstance(summary_text, str):
+        summary_text = ""
+    summary_text = summary_text.strip()
+    if summary_text:
+        return summary_text
+    return current_summary.strip() if isinstance(current_summary, str) else ""
+
+
+def maybe_insert_ltm_summary(
+    log_data,
+    *,
+    client,
+    model: str,
+) -> str | None:
+    steps = log_data.get("steps")
+    if not isinstance(steps, list):
+        return None
+    summary_text, stm_steps, last_summary_index = get_ltm_summary_and_stm_steps(steps)
+    if len(stm_steps) <= MAX_STM_SIZE:
+        return None
+    batch_steps, insert_index = collect_stm_batch(
+        steps, last_summary_index, LTM_BATCH_SIZE
+    )
+    if len(batch_steps) < LTM_BATCH_SIZE:
+        return None
+    updated_summary = summarize_ltm_batch(
+        client,
+        model=model,
+        current_summary=summary_text,
+        batch_steps=batch_steps,
+    )
+    summary_step = build_summary_step(updated_summary, batch_steps)
+    summary_step["i"] = next_step_id(steps)
+    steps.insert(insert_index, summary_step)
+    return updated_summary
 
 
 def create_new_log(game_path, model_name, initial_observation, *, seed: int):
@@ -205,17 +427,12 @@ class LLMAgent:
     def __init__(self, client, game_name):
         self.client = client
         self.model = "gpt-5-mini"
-        self.game_history = [
-            {
-                "role": "system",
-                "content": (
-                    f"You are playing the game {game_name}. You are the player and you "
-                    "are trying to win the game. Commands should be short and concise "
-                    "(never more than one short sentence, typically just one or two "
-                    "words). You are connected directly to the game engine."
-                ),
-            }
-        ]
+        self.system_prompt = (
+            f"You are playing the game {game_name}. You are the player and you "
+            "are trying to win the game. Commands should be short and concise "
+            "(never more than one short sentence, typically just one or two "
+            "words). You are connected directly to the game engine."
+        )
 
     @staticmethod
     def _approx_tokens_from_text(text: str) -> int:
@@ -250,19 +467,40 @@ class LLMAgent:
             "approx_tokens_total": cls._approx_tokens_from_chars(chars_total),
         }
 
-    def get_action(self, observation, *, temporary_snapshot=None):
-        self.game_history.append({"role": "user", "content": observation})
-        messages = list[dict[str, str]](self.game_history[:-1])
+    def build_messages(
+        self,
+        *,
+        ltm_summary: str,
+        stm_steps: list[dict[str, Any]],
+        current_observation: str,
+        temporary_snapshot: str | None,
+    ) -> list[dict[str, str]]:
+        messages = [{"role": "system", "content": self.system_prompt}]
+        if ltm_summary:
+            messages.append(
+                {"role": "user", "content": f"Summary so far:\n{ltm_summary}"}
+            )
+        recent_turns = format_recent_turns(stm_steps)
+        if recent_turns:
+            messages.append({"role": "user", "content": recent_turns})
+        if not recent_turns and current_observation:
+            messages.append(
+                {"role": "user", "content": f"Current observation:\n{current_observation}"}
+            )
         if temporary_snapshot:
             messages.append({"role": "user", "content": temporary_snapshot})
-        history_summary_before = self._summarize_messages(self.game_history)
-        request_summary = self._summarize_messages(messages)
+        return messages
+
+    def get_action(self, messages: list[dict[str, str]]):
+        if not messages:
+            raise ValueError("LLM prompt messages are required.")
+        history_summary_before = self._summarize_messages(messages)
+        request_summary = history_summary_before
         response = self.client.chat.completions.create(
             model=self.model,
             messages=messages,
         )
         model_response = response.choices[0].message.content
-        self.game_history.append({"role": "assistant", "content": model_response})
         usage = getattr(response, "usage", None)
         usage_dict: dict[str, Any] | None = None
         if usage is not None:
@@ -271,7 +509,9 @@ class LLMAgent:
                 "completion_tokens": getattr(usage, "completion_tokens", None),
                 "total_tokens": getattr(usage, "total_tokens", None),
             }
-        history_summary_after = self._summarize_messages(self.game_history)
+        history_summary_after = self._summarize_messages(
+            messages + [{"role": "assistant", "content": model_response or ""}]
+        )
         journal = {
             "model": self.model,
             "request": request_summary,
@@ -282,7 +522,7 @@ class LLMAgent:
         return model_response, journal
 
 
-def extract_aux_meta(info, *, reward, done):
+def extract_aux_meta(info, *, reward, done, moves_override: int | None = None):
     moves = None
     score = None
     if isinstance(info, dict):
@@ -290,6 +530,8 @@ def extract_aux_meta(info, *, reward, done):
             moves = info.get("moves")
         if "score" in info:
             score = info.get("score")
+    if moves_override is not None:
+        moves = moves_override
     return AuxMeta(moves=moves, score=score, reward=reward, done=done)
 
 
@@ -344,8 +586,13 @@ def build_aux_snapshot(
     aux_panels,
     include_aux_snapshot,
     main_observation,
+    moves_override: int | None = None,
 ):
-    aux = AuxSnapshot(meta=extract_aux_meta(info, reward=reward, done=done))
+    aux = AuxSnapshot(
+        meta=extract_aux_meta(
+            info, reward=reward, done=done, moves_override=moves_override
+        )
+    )
     if include_aux_snapshot and not done:
         saved_state = env.get_state()
         main_text = (main_observation or "").strip()
@@ -435,6 +682,12 @@ def main():
 
         human_mode = args.human
         repeat_tracker = RepeatActionTracker()
+        move_tracker = MoveTracker()
+        if isinstance(info, dict):
+            initial_moves = info.get("moves")
+            if isinstance(initial_moves, int):
+                move_tracker.logical_moves = initial_moves
+                move_tracker.last_engine_moves = initial_moves
 
         while True:
             llm_journal: dict[str, Any] | None = None
@@ -447,6 +700,7 @@ def main():
                 aux_panels=DEFAULT_AUX_PANELS,
                 include_aux_snapshot=True,
                 main_observation=observation,
+                moves_override=move_tracker.logical_moves,
             )
             if done:
                 return
@@ -475,9 +729,16 @@ def main():
                 observation_for_llm = (
                     repeat_tracker.last_augmented_observation or observation
                 )
-                command, llm_journal = llm_agent.get_action(
-                    observation_for_llm, temporary_snapshot=temporary_snapshot
+                ltm_summary, stm_steps, _ = get_ltm_summary_and_stm_steps(
+                    log_data.get("steps", [])
                 )
+                messages = llm_agent.build_messages(
+                    ltm_summary=ltm_summary,
+                    stm_steps=stm_steps,
+                    current_observation=observation_for_llm,
+                    temporary_snapshot=temporary_snapshot,
+                )
+                command, llm_journal = llm_agent.get_action(messages)
                 print(f"LLM> {command}")
                 actor = "llm"
 
@@ -488,6 +749,10 @@ def main():
             command_queue.append(command)
             env.set_state(current_state)
             observation, reward, done, info = env.step(command)
+            engine_moves = None
+            if isinstance(info, dict):
+                engine_moves = info.get("moves")
+            logical_moves = move_tracker.advance(engine_moves)
             state_after = env.get_state()
             aux_post = build_aux_snapshot(
                 env,
@@ -497,6 +762,7 @@ def main():
                 aux_panels=DEFAULT_AUX_PANELS,
                 include_aux_snapshot=True,
                 main_observation=observation,
+                moves_override=logical_moves,
             )
             env.set_state(state_after)
             current_state = state_after
@@ -533,6 +799,18 @@ def main():
                 aux_post,
                 llm_journal=(llm_journal if actor == "llm" else None),
             )
+            updated_summary = maybe_insert_ltm_summary(
+                log_data,
+                client=llm_agent.client,
+                model=llm_agent.model,
+            )
+
+            if updated_summary:
+                print("~" * 80)
+                print("Updated summary:")
+                print(updated_summary)
+                print("~" * 80)
+
             write_log_atomic(log_path, log_data)
 
             if done:
