@@ -211,7 +211,8 @@ def build_summary_prompts(
         "Previous Summary.\n"
         "2. Drop trivial details (e.g., typos, 'look' commands that revealed "
         "nothing new, failed movement attempts).\n"
-        "3. Maintain a coherent narrative flow.\n"
+        "3. Maintain a coherent narrative flow _in the past tense_; keep in mind that "
+        "the player is moving in time and you are writing about past events.\n"
         "4. Output ONLY the updated summary."
     )
     turns_text = format_turns_for_summary(batch_steps)
