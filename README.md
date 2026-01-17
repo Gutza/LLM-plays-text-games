@@ -17,7 +17,7 @@ Run classic Z-machine interactive fiction (Zork, etc.) through a real interprete
 2) Run the installer:
 
 ```bash
-./install.sh
+./install.bash
 ```
 
 What it does:

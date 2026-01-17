@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 uv -V > /dev/null 2>&1 || {
     echo "Please install Python and uv: https://docs.astral.sh/uv/getting-started/installation"
@@ -7,11 +7,6 @@ uv -V > /dev/null 2>&1 || {
 
 uv sync || {
     echo "Failed to sync dependencies"
-    exit 1
-}
-
-mkdir -p savegames || {
-    echo "Failed to create savegames directory"
     exit 1
 }
 
