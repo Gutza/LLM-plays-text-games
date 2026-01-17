@@ -16,6 +16,7 @@ from src.savegame import (
     write_log_atomic,
 )
 
+MAX_REPEAT_COUNT = 7
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Play Z-machine games via LLM.")
@@ -153,7 +154,7 @@ def main():
             )
             print(step_result.augmented_observation)
 
-            append_step_with_aux(
+            step_data = append_step_with_aux(
                 log_data,
                 actor,
                 step_result.command,
@@ -178,6 +179,13 @@ def main():
 
             if step_result.done:
                 return
+
+            if step_result.repeat_count > MAX_REPEAT_COUNT:
+                print("~" * 80)
+                print("Repeat count exceeded; handing over control to the human.")
+                print("~" * 80)
+                human_mode = True
+                continue
     finally:
         engine.close()
 

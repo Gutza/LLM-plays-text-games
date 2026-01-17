@@ -23,6 +23,7 @@ class StepResult:
     info: Any
     aux_snapshot: AuxSnapshot
     llm_journal: dict[str, Any] | None
+    repeat_count: int
 
 
 def format_aux_snapshot(aux: AuxSnapshot, *, header: str) -> str:
@@ -212,6 +213,7 @@ class GameEngine:
             info=info,
             aux_snapshot=aux_post,
             llm_journal=llm_journal,
+            repeat_count=self.repeat_tracker.repeat_count,
         )
 
     def _engine_moves_from_info(self, info: Any) -> int | None:
