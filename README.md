@@ -1,16 +1,18 @@
-### LLM plays Z-machine text games
+## LLM plays Z-machine text games
 
-Run classic Z-machine interactive fiction (Zork, etc.) through a real interpreter (Jericho/Frotz) and let an LLM propose commands. The session is recorded as a **JSON log** under `savegames/` so you can replay/resume later.
+Run classic Z-machine interactive fiction (Zork, etc.) through a real interpreter (Jericho/Frotz) and let an LLM propose commands. Gameplay sessions are recorded as JSON logs under `savegames/` so you can replay/resume later and generate a living strategy guide from past playthroughs.
 
-### Requirements
+## Requirements
 
-- **OS**: Linux/macOS, or **Windows via WSL2** (recommended).  
+- **OS**: Linux/macOS, or **Windows via WSL2** (recommended).
   This repo uses `jericho`/`FrotzEnv`, which is typically not a smooth native-Windows install.
 - **Python**: 3.12+
 - **uv**: Astral’s `uv` package manager (`uv sync`, `uv run`)
 - **OpenAI API key**: set `OPENAI_API_KEY`
 
-### Setup (Linux / macOS / WSL2)
+## Setup
+
+### Linux / macOS / WSL2
 
 1) Install `uv` (see `https://docs.astral.sh/uv/getting-started/installation`).
 
@@ -25,14 +27,14 @@ What it does:
 - creates `savegames/`
 - downloads a bundle of Z-machine game files into `games/`
 
-### Setup (Windows + WSL2)
+### Windows + WSL2
 
 - **Install WSL2 + Ubuntu** (or another Linux distro), then run the Linux setup steps above inside WSL.
 - Keep the repo on the Linux filesystem (best performance), e.g. under `~/src/...`, rather than `/mnt/c/...`.
 
-### Configuration
+## Configuration
 
-- **OpenAI key** (required):
+### OpenAI key (required)
 
 PowerShell:
 
@@ -47,9 +49,11 @@ export OPENAI_API_KEY="YOUR_KEY_HERE"
 ```
 
 Notes:
-- The model is currently hardcoded in `main.py` (`LLMAgent.model`, default: `gpt-5-mini`).
+- The models are currently hardcoded in `main.py` (`LLMAgent.model`) and `post-mortem.py`.
 
-### Run
+## Usage
+
+### Run a game
 
 Show help:
 
@@ -75,7 +79,19 @@ Resume/replay from an existing JSON log (it replays the command history, then ap
 uv run main.py --game games/zork1.z5 --load savegames/zork1_YYYYMMDD_HHMMSS.json
 ```
 
-### Files & data
+### Post-mortem learning (strategy guide)
+
+Generate or update a short, living strategy guide from a savegame log:
+
+```bash
+uv run post-mortem.py savegames/zork1_YYYYMMDD_HHMMSS.json
+```
+
+Notes:
+- The guide is written to `strategies/<game>.md` and is overwritten with the latest concise strategy.
+- Use `--model` to override the default model, e.g. `uv run post-mortem.py savegames/... --model gpt-5-mini`.
+
+## Files & data
 
 - **Games**: `games/` contains `.z3/.z4/.z5/.z8` story files.
 - **Logs / “savegames”**: `savegames/*.json` is an append-only history of steps:
@@ -83,8 +99,9 @@ uv run main.py --game games/zork1.z5 --load savegames/zork1_YYYYMMDD_HHMMSS.json
   - `command`: what was sent to the game
   - `observation`: game output after the command
   - `aux`: debug snapshot captured via `inventory` + `look`
+- **Strategies**: `strategies/*.md` is a short, markdown strategy guide used to inform future runs.
 
-### Troubleshooting
+## Troubleshooting
 
 - **`OpenAI(api_key=...)` errors / auth failures**: confirm `OPENAI_API_KEY` is set in the same shell where you run `uv run ...`.
 - **Jericho/Frotz install issues on Windows**: use WSL2; native Windows installs are often painful for this stack.

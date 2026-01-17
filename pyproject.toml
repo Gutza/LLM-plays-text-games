@@ -7,4 +7,5 @@ requires-python = ">=3.12"
 dependencies = [
     "jericho>=3.3.1",
     "openai>=2.15.0",
+    "wakepy>=0.10.2.post1",
 ]

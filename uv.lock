@@ -9,12 +9,14 @@ source = { virtual = "." }
 dependencies = [
     { name = "jericho" },
     { name = "openai" },
+    { name = "wakepy" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "jericho", specifier = ">=3.3.1" },
     { name = "openai", specifier = ">=2.15.0" },
+    { name = "wakepy", specifier = ">=0.10.2.post1" },
 ]
 
 [[package]]
@@ -290,6 +292,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/6f/6d/0703ccc57f3a7233505399edb88de3cbd678da106337b9fcde432b65ed60/idna-3.11.tar.gz", hash = "sha256:795dafcc9c04ed0c1fb032c2aa73654d8e8c5023a7df64a53f39190ada629902", size = 194582, upload-time = "2025-10-12T14:55:20.501Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/0e/61/66938bbb5fc52dbdf84594873d5b51fb1f7c7794e9c0f5bd885f30bc507b/idna-3.11-py3-none-any.whl", hash = "sha256:771a87f49d9defaf64091e6e6fe9c18d4833f140bd19464795bc32d966ca37ea", size = 71008, upload-time = "2025-10-12T14:55:18.883Z" },
+]
+
+[[package]]
+name = "jeepney"
+version = "0.9.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/7b/6f/357efd7602486741aa73ffc0617fb310a29b588ed0fd69c2399acbb85b0c/jeepney-0.9.0.tar.gz", hash = "sha256:cf0e9e845622b81e4a28df94c40345400256ec608d0e55bb8a3feaa9163f5732", size = 106758, upload-time = "2025-02-27T18:51:01.684Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b2/a3/e137168c9c44d18eff0376253da9f1e9234d0239e0ee230d2fee6cea8e55/jeepney-0.9.0-py3-none-any.whl", hash = "sha256:97e5714520c16fc0a45695e5365a2e11b81ea79bba796e26f9f1d178cb182683", size = 49010, upload-time = "2025-02-27T18:51:00.104Z" },
 ]
 
 [[package]]
@@ -975,6 +986,18 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/c7/24/5f1b3bdffd70275f6661c76461e25f024d5a38a46f04aaca912426a2b1d3/urllib3-2.6.3.tar.gz", hash = "sha256:1b62b6884944a57dbe321509ab94fd4d3b307075e0c2eae991ac71ee15ad38ed", size = 435556, upload-time = "2026-01-07T16:24:43.925Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/39/08/aaaad47bc4e9dc8c725e68f9d04865dbcb2052843ff09c97b08904852d84/urllib3-2.6.3-py3-none-any.whl", hash = "sha256:bf272323e553dfb2e87d9bfd225ca7b0f467b919d7bbd355436d3fd37cb0acd4", size = 131584, upload-time = "2026-01-07T16:24:42.685Z" },
+]
+
+[[package]]
+name = "wakepy"
+version = "0.10.2.post1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "jeepney", marker = "platform_system == 'DragonFly' or platform_system == 'FreeBSD' or platform_system == 'Minix' or platform_system == 'NetBSD' or platform_system == 'OpenBSD' or platform_system == 'SunOS' or sys_platform == 'aix' or sys_platform == 'linux'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e8/26/caf88d7975e1b6e181d91cbb624b63b3a455231aff50eb2cba206c7e7bd9/wakepy-0.10.2.post1.tar.gz", hash = "sha256:c968b8b7061d30ab193747ce7fb5226bc61c26b005e4a2792a19211f83cf71ac", size = 159393, upload-time = "2025-04-21T12:42:26.537Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/41/f0/1816a95fb64a574d30160e1dccc2fdee00530c9f0fc119ae8286b5e7bd02/wakepy-0.10.2.post1-py3-none-any.whl", hash = "sha256:c3fd13bb6b362decd0a2d83807fb3146a3ef5ca9b1959241bb0c06d0b35b029e", size = 56499, upload-time = "2025-04-21T12:42:25.03Z" },
 ]
 
 [[package]]

@@ -182,6 +182,92 @@ class StrategyAgent:
         return model_response.strip(), journal
 
 
+class PostMortemStrategyAgent:
+    def __init__(self, client, *, game_name: str, model: str) -> None:
+        self.client = client
+        self.model = model
+        self.system_prompt = (
+            f"You are a post-mortem strategist for the game {game_name}. "
+            "You will be given the latest long-term summary and a batch of turns "
+            "from a completed or partial playthrough. Your task is to augment an "
+            "short, markdown-rich strategy document for beating the game. "
+            "Document title: `# (Game Name) Strategy Guide`. "
+            "You must keep the strategy concise and well-structured. "
+            "Keep in mind that new playthroughs might show that previous insights are wrong or incomplete, "
+            "so you should be prepared to update the strategy accordingly. "
+            "This is supposed to be a self-contained, internally coherent, high-level set of notes for the player, "
+            "not a detailed step-by-step guide, and not a journal of the playthroughs. "
+            "Avoid mentioning \"new\"/\"updated\" insights, you'll fall into the \"new new\", \"newest last final\" silliness. "
+            "Extract concrete learnings, pitfalls, and actionable guidance. "
+            "Avoid repeating obvious or already-known facts unless the batch "
+            "adds new evidence. Output the full UPDATED strategy in markdown. "
+            "The strategy should only be about the game universe, never about saving, pausing, or other game mechanics. "
+            "Do NOT mention step numbers or step batches in the strategy; those are just for your reference, "
+            "so you can have an idea of how much time has passed since the start of the current playthrough, "
+            "but things might happen in a completely different order in the future, or the player "
+            "might not get stuck, etc. Avoid excessive verbosity; this is not a magazine article describing the game, "
+            "it's a self-contained, ever-improving, internally coherent cheat sheet for the player to avoid common pitfalls, mistakes, and bumbling around."
+        )
+
+    def build_messages(
+        self,
+        *,
+        context_line: str,
+        ltm_summary: str,
+        batch_text: str,
+        existing_strategy: str | None,
+    ) -> list[dict[str, str]]:
+        messages = [{"role": "system", "content": self.system_prompt}]
+        if context_line:
+            messages.append({"role": "user", "content": context_line})
+        if ltm_summary:
+            messages.append(
+                {"role": "user", "content": f"Latest LTM summary:\n{ltm_summary}"}
+            )
+        if existing_strategy:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": f"Existing strategy (partial or full):\n{existing_strategy}",
+                }
+            )
+        if batch_text:
+            messages.append({"role": "user", "content": f"Batch steps:\n{batch_text}"})
+        return messages
+
+    def get_strategy(self, messages: list[dict[str, str]]) -> tuple[str, dict[str, Any]]:
+        if not messages:
+            raise ValueError("LLM prompt messages are required.")
+        history_summary_before = LLMAgent._summarize_messages(messages)
+        request_summary = history_summary_before
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+        )
+        model_response = response.choices[0].message.content
+        usage = getattr(response, "usage", None)
+        usage_dict: dict[str, Any] | None = None
+        if usage is not None:
+            usage_dict = {
+                "prompt_tokens": getattr(usage, "prompt_tokens", None),
+                "completion_tokens": getattr(usage, "completion_tokens", None),
+                "total_tokens": getattr(usage, "total_tokens", None),
+            }
+        history_summary_after = LLMAgent._summarize_messages(
+            messages + [{"role": "assistant", "content": model_response or ""}]
+        )
+        journal = {
+            "model": self.model,
+            "request": request_summary,
+            "history_before": history_summary_before,
+            "history_after": history_summary_after,
+            "usage": usage_dict,
+        }
+        if not isinstance(model_response, str):
+            return "", journal
+        return model_response.strip(), journal
+
+
 class LLMManager:
     def __init__(
         self,
@@ -202,6 +288,9 @@ class LLMManager:
         self.strategy_agent = StrategyAgent(
             client, game_name=game_name, model=strategy_model
         )
+        self.post_mortem_agent = PostMortemStrategyAgent(
+            client, game_name=game_name, model=strategy_model
+        )
 
     def set_gameplay_model(self, model: str) -> None:
         if not model:
@@ -219,6 +308,7 @@ class LLMManager:
             raise ValueError("Strategy model name is required.")
         self.strategy_model = model
         self.strategy_agent.model = model
+        self.post_mortem_agent.model = model
 
     def get_summarizer(self) -> Callable[[str, str], str]:
         def summarize(system_prompt: str, user_prompt: str) -> str:

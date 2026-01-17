@@ -2,10 +2,16 @@ import argparse
 import os
 import sys
 from pathlib import Path
+from wakepy import keep
 
 from openai import OpenAI
 
-from src.engine import DEFAULT_AUX_PANELS, GameEngine, format_aux_snapshot
+from src.engine import (
+    DEFAULT_AUX_PANELS,
+    GameEngine,
+    format_aux_snapshot,
+    get_panel_content,
+)
 from src.llm import LLMManager
 from src.savegame import (
     append_step_with_aux,
@@ -20,6 +26,42 @@ from src.savegame import (
 
 MAX_REPEAT_COUNT = 7
 STRATEGY_LENGTH = 7
+
+
+def load_strategy_guide(game_name: str) -> str:
+    if not game_name:
+        return ""
+    strategy_path = Path("strategies") / f"{game_name}.md"
+    if not strategy_path.exists():
+        return ""
+    return strategy_path.read_text(encoding="utf-8").strip()
+
+
+def build_strategy_context(guide_text: str, latest_strategy: str) -> str:
+    guide = guide_text.strip() if isinstance(guide_text, str) else ""
+    latest = latest_strategy.strip() if isinstance(latest_strategy, str) else ""
+
+    result = ""
+    if guide:
+        result += f"Strategy guide:\n{guide}\n\n"
+    if latest:
+        result += f"Latest short-term strategy:\n{latest}\n\n"
+    return result.strip()
+
+
+def build_strategy_aux_context(aux_snapshot) -> str:
+    if not aux_snapshot:
+        return ""
+    environment = get_panel_content(aux_snapshot, "ENVIRONMENT").strip()
+    inventory = get_panel_content(aux_snapshot, "INVENTORY").strip()
+    if not environment and not inventory:
+        return ""
+    parts: list[str] = []
+    if environment:
+        parts.append(f"Environment:\n{environment}")
+    if inventory:
+        parts.append(f"Inventory:\n{inventory}")
+    return "\n\n".join(parts)
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Play Z-machine games via LLM.")
@@ -36,6 +78,11 @@ def parse_args():
         "--human",
         action="store_true",
         help="Start in human mode; type LLM to hand over control",
+    )
+    parser.add_argument(
+        "--ignore-strategy",
+        action="store_true",
+        help="Ignore the strategy guide and start with an empty strategy; useful for creative exploration",
     )
     return parser.parse_args()
 
@@ -65,6 +112,10 @@ def main():
     args = parse_args()
     game_path = resolve_game_path(args.game)
     default_seed = 42
+
+    strategy_guide = ""
+    if not args.ignore_strategy:
+        strategy_guide = load_strategy_guide(game_path.stem)
 
     client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
     llm_manager = LLMManager(
@@ -108,6 +159,32 @@ def main():
         if engine.done:
             return
 
+        ltm_summary, stm_steps, _ = get_ltm_summary_and_stm_steps(
+            log_data.get("steps", [])
+        )
+        current_strategy, _ = get_latest_strategy(log_data.get("steps", []))
+        preemptive_strategy = ""
+        initial_aux_snapshot = engine.build_aux_snapshot(include_aux_snapshot=True)
+        strategy_messages = llm_manager.strategy_agent.build_messages(
+            ltm_summary=ltm_summary,
+            stm_steps=stm_steps,
+        )
+        strategy_context = build_strategy_context(strategy_guide, current_strategy)
+        strategy_aux_context = build_strategy_aux_context(initial_aux_snapshot)
+        if strategy_aux_context:
+            strategy_messages.append(
+                {"role": "user", "content": strategy_aux_context}
+            )
+        preemptive_strategy, _ = llm_manager.strategy_agent.get_strategy(
+            strategy_messages,
+            strategy_context,
+        )
+        if preemptive_strategy:
+            print("~" * 80)
+            print("Initial strategy:")
+            print(preemptive_strategy)
+            print("~" * 80)
+
         human_mode = args.human
         while True:
             aux_snapshot = engine.build_aux_snapshot(include_aux_snapshot=True)
@@ -139,6 +216,8 @@ def main():
                     log_data.get("steps", [])
                 )
                 current_strategy, _ = get_latest_strategy(log_data.get("steps", []))
+                if not current_strategy and preemptive_strategy:
+                    current_strategy = preemptive_strategy
                 strategy_to_store = None
                 if should_refresh_strategy(
                     log_data.get("steps", []),
@@ -148,9 +227,17 @@ def main():
                         ltm_summary=ltm_summary,
                         stm_steps=stm_steps,
                     )
+                    strategy_context = build_strategy_context(
+                        strategy_guide, current_strategy
+                    )
+                    strategy_aux_context = build_strategy_aux_context(aux_snapshot)
+                    if strategy_aux_context:
+                        strategy_messages.append(
+                            {"role": "user", "content": strategy_aux_context}
+                        )
                     current_strategy, _ = llm_manager.strategy_agent.get_strategy(
                         strategy_messages,
-                        current_strategy,
+                        strategy_context,
                     )
                     if current_strategy:
                         print("~" * 80)
@@ -217,4 +304,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # with keep.running(): # Not working in WSL2
+        main()
