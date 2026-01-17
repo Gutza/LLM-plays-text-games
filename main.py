@@ -1,10 +1,7 @@
 import argparse
-import os
 import sys
 from pathlib import Path
 from wakepy import keep
-
-from openai import OpenAI
 
 from src.engine import (
     DEFAULT_AUX_PANELS,
@@ -12,7 +9,7 @@ from src.engine import (
     format_aux_snapshot,
     get_panel_content,
 )
-from src.llm import LLMManager
+from src.llm import LLMManager, build_default_llm_config, load_llm_config
 from src.savegame import (
     append_step_with_aux,
     create_new_log,
@@ -117,13 +114,19 @@ def main():
     if not args.ignore_strategy:
         strategy_guide = load_strategy_guide(game_path.stem)
 
-    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-    llm_manager = LLMManager(
-        client,
-        game_name=game_path.stem,
+    llm_defaults = build_default_llm_config(
         gameplay_model="gpt-5-mini",
         summary_model="gpt-5-mini",
         strategy_model="gpt-5-mini",
+        post_mortem_model="gpt-5-mini",
+    )
+    llm_config = load_llm_config(Path("llm_config.json"), llm_defaults)
+    llm_manager = LLMManager(
+        game_name=game_path.stem,
+        gameplay=llm_config.gameplay,
+        summary=llm_config.summary,
+        strategy=llm_config.strategy,
+        post_mortem=llm_config.post_mortem,
     )
 
     log_path = None

@@ -211,14 +211,14 @@ def build_summary_prompts(
         "Previous Summary.\n"
         "2. Drop trivial details (e.g., typos, 'look' commands that revealed "
         "nothing new, failed movement attempts).\n"
-        "3. Maintain a coherent narrative flow _in the past tense_; keep in mind that "
-        "the player is moving in time and you are writing about past events.\n"
+        "3. Maintain a coherent narrative flow _in the second person, past tense_ (\"You started in a field with a goat. You walked west to the house, where you unlocked the door, etc.\"), describing the player's actions and observations; keep in mind that "
+        "the player is moving in time and you are writing about past events. Avoid using first or third person pronouns like \"I\" or \"the player\" when describing the actions and observations.\n"
         "4. Output ONLY the updated summary."
     )
     turns_text = format_turns_for_summary(batch_steps)
     user_prompt = (
         "Previous Summary:\n"
-        f"{current_summary.strip() if isinstance(current_summary, str) else ''}\n\n"
+        f"{current_summary.strip() if isinstance(current_summary, str) else '(not available yet)'}\n\n"
         "New Game Turns:\n"
         f"{turns_text}"
     )

@@ -1,4 +1,91 @@
+import json
+import os
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
+
+from openai import OpenAI
+
+
+@dataclass
+class ProviderConfig:
+    model: str
+    base_url: str | None = None
+    api_key: str | None = None
+
+    def resolved_api_key(self) -> str | None:
+        if not self.api_key:
+            return None
+        if self.api_key.strip() == "${OPENAI_API_KEY}":
+            return os.environ.get("OPENAI_API_KEY")
+        return self.api_key
+
+
+@dataclass
+class LLMConfig:
+    gameplay: ProviderConfig
+    summary: ProviderConfig
+    strategy: ProviderConfig
+    post_mortem: ProviderConfig
+
+
+def build_default_llm_config(
+    *,
+    gameplay_model: str,
+    summary_model: str,
+    strategy_model: str,
+    post_mortem_model: str,
+) -> LLMConfig:
+    return LLMConfig(
+        gameplay=ProviderConfig(model=gameplay_model),
+        summary=ProviderConfig(model=summary_model),
+        strategy=ProviderConfig(model=strategy_model),
+        post_mortem=ProviderConfig(model=post_mortem_model),
+    )
+
+
+def load_llm_config(config_path: Path, defaults: LLMConfig) -> LLMConfig:
+    if not config_path.exists():
+        return defaults
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("llm_config.json must contain a JSON object.")
+
+    def _require_model(value: object, role: str) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{role} model name is required.")
+        return value.strip()
+
+    def _load_role(role: str, default: ProviderConfig) -> ProviderConfig:
+        raw = payload.get(role)
+        if raw is None:
+            return default
+        if not isinstance(raw, dict):
+            raise ValueError(f"{role} config must be a JSON object.")
+        model = _require_model(raw.get("model", default.model), role)
+        base_url = raw.get("base_url", default.base_url)
+        api_key = raw.get("api_key", default.api_key)
+        if base_url is not None and not isinstance(base_url, str):
+            raise ValueError(f"{role}.base_url must be a string.")
+        if api_key is not None and not isinstance(api_key, str):
+            raise ValueError(f"{role}.api_key must be a string.")
+        return ProviderConfig(model=model, base_url=base_url, api_key=api_key)
+
+    return LLMConfig(
+        gameplay=_load_role("gameplay", defaults.gameplay),
+        summary=_load_role("summary", defaults.summary),
+        strategy=_load_role("strategy", defaults.strategy),
+        post_mortem=_load_role("post_mortem", defaults.post_mortem),
+    )
+
+
+def build_client(config: ProviderConfig) -> OpenAI:
+    api_key = config.resolved_api_key() or os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY is required to initialize the LLM client.")
+    if config.base_url:
+        return OpenAI(base_url=config.base_url, api_key=api_key)
+    return OpenAI(api_key=api_key)
 
 
 def format_recent_turns(steps: list[dict[str, Any]]) -> str:
@@ -126,7 +213,7 @@ class StrategyAgent:
         self.system_prompt = (
             f"You are a strategist for the game {game_name}. You are given the story "
             "so far and recent turns. Synthesize a concise short-term strategy for the "
-            "next several moves. Focus on medium-term goals and exploration. "
+            "next few moves. Focus on short-term goals and exploration. "
             "Look for red herrings and repetitive actions and make a note to avoid them. "
             "Output 2-4 short bullet points or a brief paragraph. Do not output commands."
         )
@@ -187,15 +274,14 @@ class PostMortemStrategyAgent:
         self.client = client
         self.model = model
         self.system_prompt = (
-            f"You are a post-mortem strategist for the game {game_name}. "
+            f"You've been playing the text adventure game {game_name}. "
             "You will be given the latest long-term summary and a batch of turns "
-            "from a completed or partial playthrough. Your task is to augment an "
-            "short, markdown-rich strategy document for beating the game. "
+            "from a completed or partial playthrough. Your task is to augment it into a "
+            "self-contained, concise, markdown-rich strategy document for beating the game. "
             "Document title: `# (Game Name) Strategy Guide`. "
-            "You must keep the strategy concise and well-structured. "
-            "Keep in mind that new playthroughs might show that previous insights are wrong or incomplete, "
-            "so you should be prepared to update the strategy accordingly. "
-            "This is supposed to be a self-contained, internally coherent, high-level set of notes for the player, "
+            "Keep in mind that new playthroughs might show that previous insights were wrong or incomplete, "
+            "so be prepared to update the strategy accordingly. "
+            "This is meant to be a self-contained, internally coherent, high-level set of notes for the player, "
             "not a detailed step-by-step guide, and not a journal of the playthroughs. "
             "Avoid mentioning \"new\"/\"updated\" insights, you'll fall into the \"new new\", \"newest last final\" silliness. "
             "Extract concrete learnings, pitfalls, and actionable guidance. "
@@ -271,25 +357,31 @@ class PostMortemStrategyAgent:
 class LLMManager:
     def __init__(
         self,
-        client,
         *,
         game_name: str,
-        gameplay_model: str,
-        summary_model: str,
-        strategy_model: str,
+        gameplay: ProviderConfig,
+        summary: ProviderConfig,
+        strategy: ProviderConfig,
+        post_mortem: ProviderConfig,
     ) -> None:
-        self.client = client
-        self.gameplay_model = gameplay_model
-        self.summary_model = summary_model
-        self.strategy_model = strategy_model
+        if not isinstance(game_name, str) or not game_name.strip():
+            raise ValueError("Game name is required.")
+        self.gameplay_client = build_client(gameplay)
+        self.summary_client = build_client(summary)
+        self.strategy_client = build_client(strategy)
+        self.post_mortem_client = build_client(post_mortem)
+        self.gameplay_model = gameplay.model
+        self.summary_model = summary.model
+        self.strategy_model = strategy.model
+        self.post_mortem_model = post_mortem.model
         self.gameplay_agent = LLMAgent(
-            client, game_name=game_name, model=gameplay_model
+            self.gameplay_client, game_name=game_name, model=self.gameplay_model
         )
         self.strategy_agent = StrategyAgent(
-            client, game_name=game_name, model=strategy_model
+            self.strategy_client, game_name=game_name, model=self.strategy_model
         )
         self.post_mortem_agent = PostMortemStrategyAgent(
-            client, game_name=game_name, model=strategy_model
+            self.post_mortem_client, game_name=game_name, model=self.post_mortem_model
         )
 
     def set_gameplay_model(self, model: str) -> None:
@@ -308,11 +400,10 @@ class LLMManager:
             raise ValueError("Strategy model name is required.")
         self.strategy_model = model
         self.strategy_agent.model = model
-        self.post_mortem_agent.model = model
 
     def get_summarizer(self) -> Callable[[str, str], str]:
         def summarize(system_prompt: str, user_prompt: str) -> str:
-            response = self.client.chat.completions.create(
+            response = self.summary_client.chat.completions.create(
                 model=self.summary_model,
                 messages=[
                     {"role": "system", "content": system_prompt},

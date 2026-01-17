@@ -9,20 +9,30 @@ class UserTimeTracker:
         self.last_step_time = 0.0
         self.reset()
 
+    def _now(self) -> float:
+        return time.time()
+
+    def _sanitize_clock(self, now: float) -> float:
+        if now < self.session_start:
+            self.session_start = now
+        if now < self.last_step_time:
+            self.last_step_time = now
+        return now
+
     def reset(self) -> None:
-        now = time.monotonic()
+        now = self._now()
         self.session_start = now
         self.last_step_time = now
 
     def snapshot(self) -> dict[str, float]:
-        now = time.monotonic()
+        now = self._sanitize_clock(self._now())
         return {
             "session_seconds": now - self.session_start,
             "since_last_step_seconds": now - self.last_step_time,
         }
 
     def mark_step(self) -> dict[str, float]:
-        now = time.monotonic()
+        now = self._sanitize_clock(self._now())
         delta = now - self.last_step_time
         total = now - self.session_start
         self.last_step_time = now
