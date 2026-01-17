@@ -56,6 +56,58 @@ def is_summary_step(step: dict[str, Any] | None) -> bool:
     return isinstance(step.get("summary"), str)
 
 
+def get_latest_strategy(
+    steps: list[dict[str, Any]] | None,
+) -> tuple[str, int]:
+    if not steps:
+        return "", -1
+    latest_strategy = ""
+    latest_index = -1
+    for idx, step in enumerate(steps):
+        if not isinstance(step, dict):
+            continue
+        strategy = step.get("strategy")
+        if not isinstance(strategy, str):
+            continue
+        strategy_text = strategy.strip()
+        if not strategy_text:
+            continue
+        latest_strategy = strategy_text
+        latest_index = idx
+    return latest_strategy, latest_index
+
+
+def count_non_summary_steps_since(
+    steps: list[dict[str, Any]] | None,
+    last_index: int,
+) -> int:
+    if not steps:
+        return 0
+    count = 0
+    for idx in range(last_index + 1, len(steps)):
+        step = steps[idx]
+        if not isinstance(step, dict):
+            continue
+        if is_summary_step(step):
+            continue
+        count += 1
+    return count
+
+
+def should_refresh_strategy(
+    steps: list[dict[str, Any]] | None,
+    *,
+    strategy_length: int,
+) -> bool:
+    if not steps:
+        return False
+    if strategy_length <= 0:
+        return False
+    _, latest_index = get_latest_strategy(steps)
+    steps_since = count_non_summary_steps_since(steps, latest_index)
+    return (steps_since + 1) >= strategy_length
+
+
 def get_ltm_summary_and_stm_steps(
     steps: list[dict[str, Any]] | None,
 ) -> tuple[str, list[dict[str, Any]], int]:
@@ -265,21 +317,25 @@ def append_step_with_aux(
     info: Any,
     aux: AuxSnapshot | None,
     *,
+    strategy: str | None = None,
     llm_journal: dict[str, Any] | None = None,
 ) -> None:
     steps = log_data.setdefault("steps", [])
     aux_dict = aux.to_dict() if aux is not None else None
-    steps.append(
-        {
-            "i": len(steps),
-            "actor": actor,
-            "command": command,
-            "observation": observation,
-            "reward": reward,
-            "done": done,
-            "info": make_json_safe(info),
-            "aux": make_json_safe(aux_dict),
-            "llm": make_json_safe(llm_journal),
-            "ts": iso_now(),
-        }
-    )
+    step_data = {
+        "i": len(steps),
+        "actor": actor,
+        "command": command,
+        "observation": observation,
+        "reward": reward,
+        "done": done,
+        "info": make_json_safe(info),
+        "aux": make_json_safe(aux_dict),
+        "llm": make_json_safe(llm_journal),
+        "ts": iso_now(),
+    }
+    if isinstance(strategy, str):
+        strategy_text = strategy.strip()
+        if strategy_text:
+            step_data["strategy"] = strategy_text
+    steps.append(step_data)

@@ -11,12 +11,15 @@ from src.savegame import (
     append_step_with_aux,
     create_new_log,
     get_ltm_summary_and_stm_steps,
+    get_latest_strategy,
     load_log,
     maybe_insert_ltm_summary,
+    should_refresh_strategy,
     write_log_atomic,
 )
 
 MAX_REPEAT_COUNT = 7
+STRATEGY_LENGTH = 7
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Play Z-machine games via LLM.")
@@ -69,6 +72,7 @@ def main():
         game_name=game_path.stem,
         gameplay_model="gpt-5-mini",
         summary_model="gpt-5-mini",
+        strategy_model="gpt-5-mini",
     )
 
     log_path = None
@@ -134,11 +138,32 @@ def main():
                 ltm_summary, stm_steps, _ = get_ltm_summary_and_stm_steps(
                     log_data.get("steps", [])
                 )
+                current_strategy, _ = get_latest_strategy(log_data.get("steps", []))
+                strategy_to_store = None
+                if should_refresh_strategy(
+                    log_data.get("steps", []),
+                    strategy_length=STRATEGY_LENGTH,
+                ):
+                    strategy_messages = llm_manager.strategy_agent.build_messages(
+                        ltm_summary=ltm_summary,
+                        stm_steps=stm_steps,
+                    )
+                    current_strategy, _ = llm_manager.strategy_agent.get_strategy(
+                        strategy_messages,
+                        current_strategy,
+                    )
+                    if current_strategy:
+                        print("~" * 80)
+                        print("Updated strategy:")
+                        print(current_strategy)
+                        print("~" * 80)
+                        strategy_to_store = current_strategy
                 messages = llm_manager.gameplay_agent.build_messages(
                     ltm_summary=ltm_summary,
                     stm_steps=stm_steps,
                     current_observation=engine.get_observation_for_llm(),
                     temporary_snapshot=temporary_snapshot,
+                    strategy=current_strategy,
                 )
                 command, llm_journal = llm_manager.gameplay_agent.get_action(messages)
                 print(f"LLM> {command}")
@@ -163,6 +188,7 @@ def main():
                 step_result.done,
                 step_result.info,
                 step_result.aux_snapshot,
+                strategy=strategy_to_store if actor == "llm" else None,
                 llm_journal=step_result.llm_journal if actor == "llm" else None,
             )
             updated_summary = maybe_insert_ltm_summary(
