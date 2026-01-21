@@ -2,6 +2,8 @@
 
 Run classic Z-machine interactive fiction (Zork, etc.) through a real interpreter (Jericho/Frotz) and let an LLM propose commands. Gameplay sessions are recorded as JSON logs under `savegames/` so you can replay/resume later and generate a living strategy guide from past playthroughs.
 
+For details about how it's actually put together see [ARCHITECTURE.md](ARCHITECTURE.md)
+
 ## Requirements
 
 - **OS**: Linux/macOS, or **Windows via WSL2** (recommended).

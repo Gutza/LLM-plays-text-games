@@ -3,4 +3,4 @@ __pycache__/
 games/
 savegames/
 strategies/
-llm_config.json
+llm_config*.json
